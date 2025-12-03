@@ -1,17 +1,39 @@
-import pandas as pd
+import os
 from pathlib import Path
+import pandas as pd
 
 # ================= CONFIG =================
 BASE_DIR = Path(__file__).resolve().parent
 
-RAW_FILE = BASE_DIR / "Raw Data" / "raw_input.xlsx"      # raw HC dump
-MAPPING_FILE = BASE_DIR / "Raw Data" / "mapping.xlsx"    # workbook with sheets: mapping, existing
+RAW_FILE = BASE_DIR / "Raw Data" / "raw_input.xlsx"        # raw HC dump
+MAPPING_FILE = BASE_DIR / "Raw Data" / "mapping.xlsx"      # workbook with 2 sheets
 
-OUTPUT_FILE = BASE_DIR / "Output" / "HC_output_with_mapping.xlsx"
-RAW_SHEET_NAME = 0          # first sheet of raw file, change if needed
-MAPPING_SHEET_NAME = "mapping"
-EXISTING_SHEET_NAME = "existing"
+RAW_SHEET_NAME = 0                 # first sheet in raw_input
+MAPPING_SHEET_NAME = "mapping"     # sheet with BL6 + MT Domain + MT Rollup2 + Generic Dept
+EXISTING_SHEET_NAME = "existing"   # sheet with Bank ID + Justification
+
+OUTPUT_FOLDER = BASE_DIR / "Output"
+OUTPUT_BASENAME = "HC_output_with_mapping.xlsx"
 # =========================================
+
+
+def get_unique_filename(base_path):
+    """
+    If base_path exists, append _1, _2, _3 etc.
+    """
+    base_path = str(base_path)
+    if not os.path.exists(base_path):
+        return base_path
+
+    name, ext = os.path.splitext(base_path)
+    counter = 1
+    new_file = f"{name}_{counter}{ext}"
+
+    while os.path.exists(new_file):
+        counter += 1
+        new_file = f"{name}_{counter}{ext}"
+
+    return new_file
 
 
 def load_raw():
@@ -36,7 +58,7 @@ def build_base_output(df_filtered):
     """
     out = pd.DataFrame()
 
-    # Rename core columns
+    # Core columns
     out["Bank ID"] = df_filtered["Employee ID"]              # Column C in raw
     out["Name"] = df_filtered["Employee Name"]               # Column D
     out["Business Level 6 Desc"] = df_filtered["Business Level 6 Desc"]  # Column V
@@ -52,10 +74,10 @@ def build_base_output(df_filtered):
     out["Start Date"] = ""
     out["End Date"] = ""
 
-    # Optional extra columns (keep if useful, or drop later)
-    out["Country"] = df_filtered["Country"]                  # Column G
-    out["Employment Type"] = df_filtered["Employment Type"]  # Column H
-    out["Global Business Function"] = df_filtered["Global Business Function"]  # Column Q
+    # Extra columns (optional)
+    out["Country"] = df_filtered["Country"]
+    out["Employment Type"] = df_filtered["Employment Type"]
+    out["Global Business Function"] = df_filtered["Global Business Function"]
 
     return out
 
@@ -69,9 +91,8 @@ def apply_mapping(output_df):
     map_df = pd.read_excel(MAPPING_FILE, sheet_name=MAPPING_SHEET_NAME, dtype=str)
     map_df = map_df.fillna("")
 
-    # For MT Domain: Business Level 6 Desc (col E) -> MT Domain (col F)
-    # We assume those columns are named exactly like this in the sheet:
-    #   "Business Level 6 Desc" and "MT Domain"
+    # Build dicts for mapping
+    # Business Level 6 Desc -> MT Domain
     domain_map = (
         map_df[["Business Level 6 Desc", "MT Domain"]]
         .drop_duplicates()
@@ -79,8 +100,7 @@ def apply_mapping(output_df):
         .to_dict()
     )
 
-    # For Generic Dept (roll up): MT Rollup Hierarchy 2 Name (col A) -> Generic Dept (roll up) (col B)
-    # Column names assumed: "MT Rollup Hierarchy 2 Name", "Generic Dept (roll up)"
+    # MT Rollup Hierarchy 2 Name -> Generic Dept (roll up)
     generic_map = (
         map_df[["MT Rollup Hierarchy 2 Name", "Generic Dept (roll up)"]]
         .drop_duplicates()
@@ -88,10 +108,7 @@ def apply_mapping(output_df):
         .to_dict()
     )
 
-    # Map into output
-    output_df["MT Domain"] = (
-        output_df["Business Level 6 Desc"].map(domain_map).fillna("")
-    )
+    output_df["MT Domain"] = output_df["Business Level 6 Desc"].map(domain_map).fillna("")
     output_df["Generic Dept (roll up)"] = (
         output_df["MT Rollup Hierarchy 2 Name"].map(generic_map).fillna("")
     )
@@ -100,8 +117,7 @@ def apply_mapping(output_df):
     existing_df = pd.read_excel(MAPPING_FILE, sheet_name=EXISTING_SHEET_NAME, dtype=str)
     existing_df = existing_df.fillna("")
 
-    # Bank ID (col A) -> Justification (col C)
-    # Assuming headers: "Bank ID", "Justification"
+    # Bank ID -> Justification
     just_map = (
         existing_df[["Bank ID", "Justification"]]
         .drop_duplicates()
@@ -109,9 +125,7 @@ def apply_mapping(output_df):
         .to_dict()
     )
 
-    output_df["Justification"] = (
-        output_df["Bank ID"].map(just_map).fillna("")
-    )
+    output_df["Justification"] = output_df["Bank ID"].map(just_map).fillna("")
 
     return output_df
 
@@ -119,9 +133,11 @@ def apply_mapping(output_df):
 def main():
     print("Loading raw file...")
     df_raw = load_raw()
+    print(f"Raw rows: {len(df_raw)}")
 
     print("Filtering raw data...")
     df_filtered = filter_raw(df_raw)
+    print(f"Rows after filters: {len(df_filtered)}")
 
     print("Building base output...")
     output = build_base_output(df_filtered)
@@ -129,9 +145,16 @@ def main():
     print("Applying mapping from mapping.xlsx...")
     output = apply_mapping(output)
 
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    output.to_excel(OUTPUT_FILE, index=False)
-    print(f"Done! Saved file to: {OUTPUT_FILE}")
+    # Ensure output folder
+    OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    # Unique filename logic
+    base_output_path = OUTPUT_FOLDER / OUTPUT_BASENAME
+    final_path = get_unique_filename(base_output_path)
+
+    print(f"Saving to: {final_path}")
+    output.to_excel(final_path, index=False)
+    print("Done.")
 
 
 if __name__ == "__main__":
