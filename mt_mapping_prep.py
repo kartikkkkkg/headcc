@@ -1,62 +1,138 @@
 import pandas as pd
+from pathlib import Path
 
-# === CONFIG ===
-INPUT_FILE = "raw_input.xlsx"        # change to your raw file
-OUTPUT_FILE = "mt_mapping_template.xlsx"   # output file name
-SHEET_NAME = 0  # 0 = first sheet, or use a name like "Sheet1"
+# ================= CONFIG =================
+BASE_DIR = Path(__file__).resolve().parent
 
-def main():
-    # Read the raw Excel
-    df = pd.read_excel(INPUT_FILE, sheet_name=SHEET_NAME, dtype=str)
+RAW_FILE = BASE_DIR / "Raw Data" / "raw_input.xlsx"      # raw HC dump
+MAPPING_FILE = BASE_DIR / "Raw Data" / "mapping.xlsx"    # workbook with sheets: mapping, existing
 
-    # Make sure we don't get NaN; easier to work with empty strings
+OUTPUT_FILE = BASE_DIR / "Output" / "HC_output_with_mapping.xlsx"
+RAW_SHEET_NAME = 0          # first sheet of raw file, change if needed
+MAPPING_SHEET_NAME = "mapping"
+EXISTING_SHEET_NAME = "existing"
+# =========================================
+
+
+def load_raw():
+    df = pd.read_excel(RAW_FILE, sheet_name=RAW_SHEET_NAME, dtype=str)
     df = df.fillna("")
+    return df
 
-    # --- Filters ---
 
-    # 1) Global Business Function = "Tech and Ops"
+def filter_raw(df):
+    # 1) Global Business Function = Tech and Ops
     mask_gbf = df["Global Business Function"] == "Tech and Ops"
 
-    # 2) MT Rollup Hierarchy 1 Name != "Eder, Noelle Kathleen"
+    # 2) Exclude MT Rollup Hierarchy 1 Name = "Eder, Noelle Kathleen"
     mask_not_eder = df["MT Rollup Hierarchy 1 Name"] != "Eder, Noelle Kathleen"
 
-    df_filtered = df[mask_gbf & mask_not_eder].copy()
+    return df[mask_gbf & mask_not_eder].copy()
 
-    # --- Build output columns ---
 
-    # Rename / map columns:
-    # Column C  -> Employee ID      -> Bank ID
-    # Column D  -> Employee Name    -> Name
-    # Column V  -> Business Level 6 Desc
-    # Column BB -> MT Rollup Hierarchy 1 Name
-    # Column BD -> MT Rollup Hierarchy 2 Name
+def build_base_output(df_filtered):
+    """
+    Create the basic output columns BEFORE mapping.
+    """
+    out = pd.DataFrame()
 
-    output = pd.DataFrame()
+    # Rename core columns
+    out["Bank ID"] = df_filtered["Employee ID"]              # Column C in raw
+    out["Name"] = df_filtered["Employee Name"]               # Column D
+    out["Business Level 6 Desc"] = df_filtered["Business Level 6 Desc"]  # Column V
+    out["MT Rollup Hierarchy 1 Name"] = df_filtered["MT Rollup Hierarchy 1 Name"]  # Column BB
+    out["MT Rollup Hierarchy 2 Name"] = df_filtered["MT Rollup Hierarchy 2 Name"]  # Column BD
 
-    # Core requested columns
-    output["Bank ID"] = df_filtered["Employee ID"]
-    output["Name"] = df_filtered["Employee Name"]
-    output["Business Level 6 Desc"] = df_filtered["Business Level 6 Desc"]
-    output["MT Rollup Hierarchy 1 Name"] = df_filtered["MT Rollup Hierarchy 1 Name"]
-    output["MT Rollup Hierarchy 2 Name"] = df_filtered["MT Rollup Hierarchy 2 Name"]
+    # Placeholders for mapped fields
+    out["MT Domain"] = ""
+    out["Generic Dept (roll up)"] = ""
+    out["Justification"] = ""
 
-    # Columns to be filled later via mapping
-    output["MT Domain"] = ""
-    output["Generic Dept (roll up)"] = ""
-    output["Justification"] = ""
+    # Date columns (empty)
+    out["Start Date"] = ""
+    out["End Date"] = ""
 
-    # Empty date columns
-    output["Start Date"] = ""
-    output["End Date"] = ""
+    # Optional extra columns (keep if useful, or drop later)
+    out["Country"] = df_filtered["Country"]                  # Column G
+    out["Employment Type"] = df_filtered["Employment Type"]  # Column H
+    out["Global Business Function"] = df_filtered["Global Business Function"]  # Column Q
 
-    # Helpful columns for mapping logic later (can be dropped if you don't want them)
-    output["Country"] = df_filtered["Country"]            # Column G
-    output["Employment Type"] = df_filtered["Employment Type"]  # Column H
-    output["Global Business Function"] = df_filtered["Global Business Function"]  # Column Q
+    return out
 
-    # Save to Excel
+
+def apply_mapping(output_df):
+    """
+    Use mapping.xlsx to fill MT Domain, Generic Dept (roll up), and Justification.
+    """
+
+    # ---- Sheet: mapping ----
+    map_df = pd.read_excel(MAPPING_FILE, sheet_name=MAPPING_SHEET_NAME, dtype=str)
+    map_df = map_df.fillna("")
+
+    # For MT Domain: Business Level 6 Desc (col E) -> MT Domain (col F)
+    # We assume those columns are named exactly like this in the sheet:
+    #   "Business Level 6 Desc" and "MT Domain"
+    domain_map = (
+        map_df[["Business Level 6 Desc", "MT Domain"]]
+        .drop_duplicates()
+        .set_index("Business Level 6 Desc")["MT Domain"]
+        .to_dict()
+    )
+
+    # For Generic Dept (roll up): MT Rollup Hierarchy 2 Name (col A) -> Generic Dept (roll up) (col B)
+    # Column names assumed: "MT Rollup Hierarchy 2 Name", "Generic Dept (roll up)"
+    generic_map = (
+        map_df[["MT Rollup Hierarchy 2 Name", "Generic Dept (roll up)"]]
+        .drop_duplicates()
+        .set_index("MT Rollup Hierarchy 2 Name")["Generic Dept (roll up)"]
+        .to_dict()
+    )
+
+    # Map into output
+    output_df["MT Domain"] = (
+        output_df["Business Level 6 Desc"].map(domain_map).fillna("")
+    )
+    output_df["Generic Dept (roll up)"] = (
+        output_df["MT Rollup Hierarchy 2 Name"].map(generic_map).fillna("")
+    )
+
+    # ---- Sheet: existing ----
+    existing_df = pd.read_excel(MAPPING_FILE, sheet_name=EXISTING_SHEET_NAME, dtype=str)
+    existing_df = existing_df.fillna("")
+
+    # Bank ID (col A) -> Justification (col C)
+    # Assuming headers: "Bank ID", "Justification"
+    just_map = (
+        existing_df[["Bank ID", "Justification"]]
+        .drop_duplicates()
+        .set_index("Bank ID")["Justification"]
+        .to_dict()
+    )
+
+    output_df["Justification"] = (
+        output_df["Bank ID"].map(just_map).fillna("")
+    )
+
+    return output_df
+
+
+def main():
+    print("Loading raw file...")
+    df_raw = load_raw()
+
+    print("Filtering raw data...")
+    df_filtered = filter_raw(df_raw)
+
+    print("Building base output...")
+    output = build_base_output(df_filtered)
+
+    print("Applying mapping from mapping.xlsx...")
+    output = apply_mapping(output)
+
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     output.to_excel(OUTPUT_FILE, index=False)
-    print(f"Done! Saved filtered template to: {OUTPUT_FILE}")
+    print(f"Done! Saved file to: {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
     main()
